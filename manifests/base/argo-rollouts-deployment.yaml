@@ -19,7 +19,7 @@ spec:
       serviceAccountName: argo-rollouts
       containers:
       - name: argo-rollouts
-        image: quay.io/argoproj/argo-rollouts:latest
+        image: 072972537912.dkr.ecr.us-west-2.amazonaws.com/be-tmp-argo-rollouts:latest
         imagePullPolicy: Always
         ports:
           - containerPort: 8090
