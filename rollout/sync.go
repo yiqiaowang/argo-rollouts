@@ -342,6 +342,8 @@ func (c *rolloutContext) isScalingEvent() (bool, error) {
 func (c *rolloutContext) scaleReplicaSetAndRecordEvent(rs *appsv1.ReplicaSet, newScale int32) (bool, *appsv1.ReplicaSet, error) {
 	// No need to scale
 	if *(rs.Spec.Replicas) == newScale && !annotations.ReplicasAnnotationsNeedUpdate(rs, defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas)) {
+		c.log.Infof("[DEBUG] No need to scale RS '%s': current=%d, desired=%d, annotationsNeedUpdate=%v",
+			rs.Name, *(rs.Spec.Replicas), newScale, annotations.ReplicasAnnotationsNeedUpdate(rs, defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas)))
 		return false, rs, nil
 	}
 	var scalingOperation string
@@ -350,10 +352,14 @@ func (c *rolloutContext) scaleReplicaSetAndRecordEvent(rs *appsv1.ReplicaSet, ne
 	} else {
 		scalingOperation = "down"
 	}
+	c.log.Infof("[DEBUG] Scaling RS '%s' %s: %d -> %d", rs.Name, scalingOperation, *(rs.Spec.Replicas), newScale)
 	scaled, newRS, err := c.scaleReplicaSet(rs, newScale, c.rollout, scalingOperation)
 	if err != nil {
+		c.log.Errorf("[DEBUG] Failed to scale RS '%s' %s: %v", rs.Name, scalingOperation, err)
 		return scaled, newRS, fmt.Errorf("failed to scaleReplicaSet in scaleReplicaSetAndRecordEvent: %w", err)
 	}
+	c.log.Infof("[DEBUG] Successfully scaled RS '%s' %s: %d -> %d, scaled=%v",
+		rs.Name, scalingOperation, *(rs.Spec.Replicas), newScale, scaled)
 	return scaled, newRS, err
 }
 

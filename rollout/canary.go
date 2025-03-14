@@ -172,52 +172,76 @@ func (c *rolloutContext) scaleDownOldReplicaSetsForCanary(oldRSs []*appsv1.Repli
 	if err != nil {
 		return totalScaledDown, nil
 	}
+
+	c.log.Infof("[DEBUG] Starting scaleDownOldReplicaSetsForCanary with %d oldRSs", len(oldRSs))
+
 	availablePodCount := replicasetutil.GetAvailableReplicaCountForReplicaSets(c.allRSs)
 	minAvailable := defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas) - replicasetutil.MaxUnavailable(c.rollout)
 	maxScaleDown := availablePodCount - minAvailable
 	if maxScaleDown <= 0 {
 		// Cannot scale down.
+		c.log.Infof("[DEBUG] Cannot scale down: maxScaleDown=%d (availablePodCount=%d, minAvailable=%d)",
+			maxScaleDown, availablePodCount, minAvailable)
 		return 0, nil
 	}
 	c.log.Infof("Found %d available pods, scaling down old RSes (minAvailable: %d, maxScaleDown: %d)", availablePodCount, minAvailable, maxScaleDown)
 
 	sort.Sort(sort.Reverse(replicasetutil.ReplicaSetsByRevisionNumber(oldRSs)))
 
+	c.log.Infof("[DEBUG] Checking if can proceed with scale down annotation")
 	if canProceed, err := c.canProceedWithScaleDownAnnotation(oldRSs); !canProceed || err != nil {
+		c.log.Infof("[DEBUG] Cannot proceed with scale down: canProceed=%v, err=%v", canProceed, err)
 		return 0, err
 	}
+	c.log.Infof("[DEBUG] Can proceed with scale down annotation")
 
 	annotationedRSs := int32(0)
-	for _, targetRS := range oldRSs {
+	for i, targetRS := range oldRSs {
+		c.log.Infof("[DEBUG] Processing oldRS[%d] '%s': replicas=%d, hasScaleDownDeadline=%v",
+			i, targetRS.Name, *targetRS.Spec.Replicas, replicasetutil.HasScaleDownDeadline(targetRS))
+
 		if c.rollout.Spec.Strategy.Canary.TrafficRouting != nil && c.isReplicaSetReferenced(targetRS) {
 			// We might get here if user interrupted an an update in order to move back to stable.
-			c.log.Infof("Skip scale down of older RS '%s': still referenced", targetRS.Name)
+			c.log.Infof("[DEBUG] Skip scale down of older RS '%s': still referenced", targetRS.Name)
 			continue
 		}
 		if maxScaleDown <= 0 {
+			c.log.Infof("[DEBUG] Breaking loop: maxScaleDown=%d", maxScaleDown)
 			break
 		}
 		if *targetRS.Spec.Replicas == 0 {
 			// cannot scale down this ReplicaSet.
+			c.log.Infof("[DEBUG] Skip RS '%s': already at 0 replicas", targetRS.Name)
 			continue
 		}
+
+		c.log.Infof("[DEBUG] Determining desiredReplicaCount for RS '%s'", targetRS.Name)
 		desiredReplicaCount := int32(0)
 		if c.rollout.Spec.Strategy.Canary.TrafficRouting == nil {
 			// For basic canary, we must scale down all other ReplicaSets because existence of
 			// those pods will cause traffic to be served by them
+			c.log.Infof("[DEBUG] Using basic canary scaling logic")
 			if *targetRS.Spec.Replicas > maxScaleDown {
 				desiredReplicaCount = *targetRS.Spec.Replicas - maxScaleDown
 			}
 		} else {
+			c.log.Infof("[DEBUG] Using traffic-routed canary scaling logic. IsFullyPromoted=%v", rolloututil.IsFullyPromoted(c.rollout))
 			if rolloututil.IsFullyPromoted(c.rollout) || replicasetutil.HasScaleDownDeadline(targetRS) {
 				// If we are fully promoted and we encounter an old ReplicaSet, we can infer that
 				// this ReplicaSet is likely the previous stable. We should do one of two things:
+				c.log.Infof("[DEBUG] RS '%s' is in fully promoted or has scale-down deadline. DynamicStableScale=%v",
+					targetRS.Name, c.rollout.Spec.Strategy.Canary.DynamicStableScale)
 				if c.rollout.Spec.Strategy.Canary.DynamicStableScale {
 					// 1. if we are using dynamic scaling, then this should be scaled down to 0 now
+					c.log.Infof("[DEBUG] Using dynamic stable scale - setting desiredReplicaCount=0")
 					desiredReplicaCount = 0
 				} else {
 					// 2. otherwise, honor scaledown delay second and keep replicas of the current step
+					c.log.Infof("[DEBUG] Before scaleDownDelayHelper: annotationedRSs=%d, *targetRS.Spec.Replicas=%d",
+						annotationedRSs, *targetRS.Spec.Replicas)
 					annotationedRSs, desiredReplicaCount, err = c.scaleDownDelayHelper(targetRS, annotationedRSs, *targetRS.Spec.Replicas)
+					c.log.Infof("[DEBUG] After scaleDownDelayHelper: annotationedRSs=%d, desiredReplicaCount=%d, err=%v",
+						annotationedRSs, desiredReplicaCount, err)
 					if err != nil {
 						return totalScaledDown, err
 					}
@@ -229,23 +253,34 @@ func (c *rolloutContext) scaleDownOldReplicaSetsForCanary(oldRSs []*appsv1.Repli
 				// mind in the middle of an V1 -> V2 update, and then applies a V3. We are deciding
 				// what to do with the defunct, intermediate V2 ReplicaSet right now.
 				// It is safe to scale the intermediate RS down, since no traffic is directed to it.
-				c.log.Infof("scaling down intermediate RS '%s'", targetRS.Name)
+				c.log.Infof("[DEBUG] Scaling down intermediate RS '%s' - not fully promoted", targetRS.Name)
 			}
 		}
+
 		if *targetRS.Spec.Replicas == desiredReplicaCount {
 			// already at desired account, nothing to do
+			c.log.Infof("[DEBUG] RS '%s' already at desired replica count (%d). Skipping scale operation.",
+				targetRS.Name, desiredReplicaCount)
 			continue
 		}
+
 		// Scale down.
+		c.log.Infof("[DEBUG] Scaling down RS '%s' from %d to %d replicas",
+			targetRS.Name, *targetRS.Spec.Replicas, desiredReplicaCount)
 		_, _, err = c.scaleReplicaSetAndRecordEvent(targetRS, desiredReplicaCount)
 		if err != nil {
+			c.log.Errorf("[DEBUG] Failed to scale down RS '%s': %v", targetRS.Name, err)
 			return totalScaledDown, fmt.Errorf("failed to scaleReplicaSetAndRecordEvent in scaleDownOldReplicaSetsForCanary: %w", err)
 		}
+		c.log.Infof("[DEBUG] Successfully scaled down RS '%s' from %d to %d replicas",
+			targetRS.Name, *targetRS.Spec.Replicas, desiredReplicaCount)
+
 		scaleDownCount := *targetRS.Spec.Replicas - desiredReplicaCount
 		maxScaleDown -= scaleDownCount
 		totalScaledDown += scaleDownCount
 	}
 
+	c.log.Infof("[DEBUG] Completed scaleDownOldReplicaSetsForCanary: totalScaledDown=%d", totalScaledDown)
 	return totalScaledDown, nil
 }
 
