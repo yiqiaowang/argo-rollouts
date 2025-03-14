@@ -388,7 +388,7 @@ spec:
       containers:
       - args:
         - --namespaced
-        image: 072972537912.dkr.ecr.us-west-2.amazonaws.com/be-tmp-argo-rollouts:latest
+        image: public.ecr.aws/g4w3s6w3/mp-argo-rollouts:latest
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 3
